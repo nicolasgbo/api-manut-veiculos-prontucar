@@ -1,6 +1,6 @@
-# ProntuCar — API de Gerenciamento de Manutenção de Veículos
+# ProntuCar — Gerenciamento de Manutenção de Veículos
 
-API REST do **ProntuCar**, sistema para registrar veículos e o histórico de manutenções de cada um, com relatórios de gastos e revisões pendentes. Projeto da disciplina de Gestão de Websites, IFPR – Campus Telêmaco Borba (Profa. Melissa Oliveira).
+Sistema **ProntuCar** (API REST + frontend) para cadastrar usuários, veículos e o histórico de manutenções, com relatórios de gastos e revisões pendentes. Projeto da disciplina de Gestão de Websites, IFPR – Campus Telêmaco Borba (Profa. Melissa Oliveira).
 
 **Integrantes:** Nicolas Gabriel de Oliveira e Wesley Lourenço
 
@@ -8,29 +8,32 @@ API REST do **ProntuCar**, sistema para registrar veículos e o histórico de ma
 
 | Tecnologia | Uso |
 |---|---|
-| Next.js (App Router, Route Handlers) | Servidor da API (`app/api/**/route.ts`) |
+| Next.js 16 (App Router) | API (`app/api/**`) e interface (`app/(app)/**`, Server Actions) |
 | TypeScript | Tipagem |
-| MySQL 8 + `mysql2` | Banco de dados, consultas SQL parametrizadas |
-| Zod | Validação dos dados de entrada |
+| MySQL 8 + `mysql2` | Persistência, SQL parametrizado |
+| Zod | Validação frontend e backend |
 | bcryptjs | Hash de senhas |
-| jsonwebtoken | Autenticação por token JWT |
+| jsonwebtoken | JWT (Bearer nas rotas `/api`) |
 
 ## Estrutura do projeto
 
 ```
-app/api/            rotas da API (HTTP, validação, autenticação, códigos de status)
+app/api/            rotas REST (HTTP, validação, autenticação, status)
+app/(app)/          páginas autenticadas (dashboard, perfil, veículos, manutenções, relatórios)
+app/login|cadastro  autenticação da interface
+app/actions/        Server Actions (consomem /api e gravam cookie HttpOnly)
+components/         UI reutilizável
 repositories/       acesso ao banco (somente SQL)
-lib/                db.ts (conexão), auth.ts (JWT), http.ts (erros), regrasManutencao.ts
-lib/validators/     schemas Zod de cada recurso
-types/              tipos TypeScript
+lib/                db, auth JWT, api-client, sessão, validators, regras
+proxy.ts            proteção otimista das rotas da UI
 database/schema.sql criação das tabelas
 ```
 
-As rotas não escrevem SQL: chamam os *repositories*, que são a única camada que fala com o banco.
+As rotas `/api` não escrevem SQL: chamam os *repositories*. A interface **não** acessa o banco direto — usa Server Components/Actions → `apiFetch` → `/api/...`.
 
 ## Como executar
 
-**Pré-requisitos:** Node.js 20+ e MySQL 8.
+**Pré-requisitos:** Node.js 20+ (recomendado 22) e MySQL 8.
 
 1. Instalar as dependências:
    ```bash
@@ -45,14 +48,51 @@ As rotas não escrevem SQL: chamam os *repositories*, que são a única camada q
    DB_PASSWORD=sua_senha
    DB_NAME=manut
    JWT_SECRET=uma_chave_longa_e_aleatoria
+   DB_SSL=false
+   # Em produção (URL pública do app), descomente e ajuste:
+   # NEXT_PUBLIC_APP_URL=https://seu-dominio-ou-ip
    ```
 4. Rodar em desenvolvimento:
    ```bash
    npm run dev
    ```
-   A API fica em `http://localhost:3000/api`.
+   Interface e API em `http://localhost:3000` (API em `/api`).
 
-Para produção: `npm run build` e `npm start`.
+Para produção: `npm run build` e `npm start` (ou `next start -H 0.0.0.0 -p $PORT` atrás do Nginx).
+
+## Frontend (interface)
+
+Páginas protegidas (exigem sessão): `/dashboard`, `/perfil`, `/veiculos`, `/manutencoes`, `/relatorios`.
+
+Páginas públicas: `/login`, `/cadastro`.
+
+| Rota | Função |
+|---|---|
+| `/login`, `/cadastro` | Autenticação e registro |
+| `/dashboard` | Resumo (veículos, manutenções, revisões pendentes) |
+| `/perfil` | Edição de nome, e-mail e senha opcional |
+| `/veiculos` | CRUD de veículos (placa, marca, modelo, ano, km) + busca |
+| `/manutencoes` | CRUD de manutenções vinculadas a veículos + filtros |
+| `/relatorios` | Gastos por veículo/tipo, custo/km, revisões pendentes |
+
+### Sessão na interface
+
+1. Login/cadastro chama `POST /api/auth/login` (e register) via Server Action.
+2. O JWT retornado é gravado no cookie **HttpOnly** `prontucar_token` (não acessível via JavaScript; **não** usa `localStorage`).
+3. Nas chamadas server-side, o cookie é lido e enviado como `Authorization: Bearer <token>` para `/api`.
+4. Em desenvolvimento (`NODE_ENV !== production`), o cookie **não** exige `Secure` (funciona em HTTP local).
+5. Em produção, `Secure=true` — a aplicação **precisa de HTTPS** (ex.: Nginx com certificado) para o cookie ser aceito pelo navegador.
+6. Sessão expirada/inválida: redirect para `/auth/limpar-sessao` (apaga o cookie) e depois `/login`.
+
+### Variável `NEXT_PUBLIC_APP_URL`
+
+Server Components/Actions precisam de URL absoluta para `fetch` em `/api`. Em produção na VM Azure, defina a URL pública do site, por exemplo:
+
+```
+NEXT_PUBLIC_APP_URL=https://seu-dominio
+```
+
+Se omitida, o fallback é `http://localhost:3000` (adequado só quando o Node escuta localmente na mesma máquina).
 
 ## Banco de dados
 
@@ -404,8 +444,19 @@ Considera apenas a manutenção **mais recente de cada tipo, por veículo**, que
 ## Segurança
 
 - Senhas armazenadas com hash bcrypt (custo 10).
-- Autenticação JWT; rotas protegidas respondem `401` sem token válido.
+- Autenticação JWT; rotas `/api` protegidas respondem `401` sem token válido.
+- Interface: JWT em cookie HttpOnly; rotas privadas redirecionam para `/login` sem sessão.
 - Consultas SQL parametrizadas (`?`), que previnem SQL injection.
-- Validação dos dados de entrada com Zod em todas as rotas de escrita.
+- Validação com Zod no backend e nas Server Actions/formulários do frontend.
 - Isolamento por usuário: todas as consultas filtram pelo dono do recurso.
-- Segredos somente em variáveis de ambiente (`.env` fora do repositório).
+- Segredos somente em variáveis de ambiente (`.env` fora do repositório; use `.env.example`).
+
+## Publicação (Azure VM — referência)
+
+Ambiente típico: Ubuntu 24.04, Node 22, Nginx, MySQL na própria VM.
+
+1. Clonar o repositório e configurar `.env` (`DB_*`, `JWT_SECRET`, `DB_SSL=false` se MySQL local, `NEXT_PUBLIC_APP_URL` com a URL pública HTTPS).
+2. `npm ci` (ou `npm install`), `npm run build`, `npm start` (ou PM2) escutando `0.0.0.0:3000`.
+3. Nginx como proxy reverso com **HTTPS** (Let's Encrypt), encaminhando para `127.0.0.1:3000`.
+4. Sem HTTPS em produção, o cookie `Secure` impede o login na interface.
+5. Não versionar `.env`; manter `JWT_SECRET` forte e distinto do ambiente local.
